@@ -122,7 +122,17 @@ st.write("---")
 
 # Barra Lateral (Filtros e Configurações)
 with st.sidebar:
-    st.header("⚙️ Painel do Docente")
+    st.header("⚙️ Painel de Controle")
+    
+    # Navegação entre páginas / modos
+    modo_visualizacao = st.radio(
+        "Modo de Visualização:",
+        ["👨‍🏫 Modo Docente (Com Nomes)", "🔒 Modo Projeção / Sala de Aula (Apenas Nº)"],
+        help="Use o 'Modo Projeção' em telão ou compartilhamento de tela com os alunos para não divulgar os nomes."
+    )
+    
+    st.write("---")
+    st.subheader("📌 Seleção da Turma")
     turma_selecionada = st.selectbox("Selecione a Turma:", turmas_keys, index=0)
     
     disciplinas_da_turma = turmas_data[turma_selecionada]["subjects"]
@@ -135,8 +145,12 @@ with st.sidebar:
     st.write("---")
     st.info("💡 **Regra de Média Ponderada**:\n(N1 × 2 + N2 × 3) / 5 ≥ 6,0\nArredondamento em 1 casa decimal.")
 
+# Chave de persistência de notas para a turma e disciplina selecionada
+storage_key = f"notas_{turma_selecionada}_{disciplina_selecionada}"
+if storage_key not in st.session_state:
+    st.session_state[storage_key] = {}
+
 # Importação de Planilha Externa
-imported_grades = {}
 if uploaded_file is not None:
     try:
         if uploaded_file.name.endswith('.csv'):
@@ -144,7 +158,7 @@ if uploaded_file is not None:
         else:
             df_imp = pd.read_excel(uploaded_file)
         
-        # Procura coluna de número e nota
+        count_imp = 0
         for _, row in df_imp.iterrows():
             vals = list(row.values)
             if len(vals) >= 2:
@@ -152,26 +166,18 @@ if uploaded_file is not None:
                     num_val = int(vals[0])
                     grade_val = float(str(vals[1]).replace(',', '.'))
                     if 0.0 <= grade_val <= 10.0:
-                        imported_grades[num_val] = grade_val
+                        st.session_state[storage_key][num_val] = grade_val
+                        count_imp += 1
                 except (ValueError, TypeError):
                     continue
-        st.sidebar.success(f"Notas importadas para {len(imported_grades)} alunos!")
+        if count_imp > 0:
+            st.sidebar.success(f"Notas importadas para {count_imp} alunos!")
     except Exception as e:
         st.sidebar.error(f"Erro ao ler arquivo: {e}")
 
-# Montagem e Gerenciamento de Estado das Notas
-state_key = f"notas_{turma_selecionada}_{disciplina_selecionada}"
-if state_key not in st.session_state:
-    st.session_state[state_key] = {}
-
-# Atualiza com notas importadas se houver
-if imported_grades:
-    for n_k, g_v in imported_grades.items():
-        st.session_state[state_key][n_k] = g_v
-
+# Montagem dos Dados da Turma Selecionada
 students = turmas_data[turma_selecionada]["students"]
 
-# Monta DataFrame inicial com cálculo prévio de Média Final e Situação
 table_data = []
 for st_item in students:
     num = st_item["num"]
@@ -179,90 +185,95 @@ for st_item in students:
     n1 = st_item["n1_grades"].get(disciplina_selecionada, None)
     meta = calc_nota_minima(n1)
     
-    current_n2 = st.session_state[state_key].get(num, None)
+    default_n2 = st.session_state[storage_key].get(num, None)
     
-    if current_n2 is not None and not pd.isna(current_n2):
-        n2_calc = round(float(current_n2), 1)
-        mf = calc_media_final(n1, n2_calc)
-        mf_str = f"{mf:.1f}" if mf is not None else "—"
-        if mf is not None:
-            status = "🟢 APROVADO" if mf >= 6.0 else "🔴 PROVA FINAL"
-        else:
-            status = "—"
-    else:
-        n2_calc = None
-        mf = None
-        mf_str = "—"
-        status = "—"
-
-    n1_str = f"{float(n1):.1f}" if isinstance(n1, (int, float)) else "(*)"
-    meta_str = f"{meta:.1f}"
-
     table_data.append({
         "num": num,
         "coc": st_item.get("coc", ""),
         "nome": nome,
         "n1": n1,
-        "n1_str": n1_str,
+        "n1_str": f"{float(n1):.1f}" if isinstance(n1, (int, float)) else "(*)",
         "meta": meta,
-        "meta_str": meta_str,
-        "n2": n2_calc,
-        "mf": mf,
-        "mf_str": mf_str,
-        "status": status
+        "n2": default_n2
     })
 
 df_display = pd.DataFrame(table_data)
 
-# Grid de Edição Interativa
-st.subheader(f"📋 Lançamento — Turma {turma_selecionada} • {disciplina_selecionada}")
+is_modo_anonimo = "Apenas Nº" in modo_visualizacao
 
-# Edição interativa das notas com colunas compactas e exibição da Situação e Média Final
+if is_modo_anonimo:
+    st.subheader(f"🔒 Modo Sala de Aula / Projeção — Turma {turma_selecionada} • {disciplina_selecionada}")
+    st.caption("🛡️ **Privacidade Garantida**: Os nomes dos estudantes foram ocultados para permitir projeção em sala ou compartilhamento de tela.")
+    
+    # Grid de Edição sem a coluna do Nome
+    cols_to_edit = ["num", "n1_str", "meta", "n2"]
+    cfg = {
+        "num": st.column_config.NumberColumn("Nº", disabled=True, width="small"),
+        "n1_str": st.column_config.TextColumn("1ª Cert. (N1)", disabled=True, width="small"),
+        "meta": st.column_config.NumberColumn("🎯 Meta N2", disabled=True, format="%.1f", width="small"),
+        "n2": st.column_config.NumberColumn("Nota 2ª Cert. (N2)", min_value=0.0, max_value=10.0, step=0.1, format="%.1f", width="medium")
+    }
+else:
+    st.subheader(f"👨‍🏫 Modo Docente — Turma {turma_selecionada} • {disciplina_selecionada}")
+    st.caption("Visão completa para conferência e lançamento pelo professor.")
+    
+    # Grid de Edição com a coluna do Nome
+    cols_to_edit = ["num", "nome", "n1_str", "meta", "n2"]
+    cfg = {
+        "num": st.column_config.NumberColumn("Nº", disabled=True, width="small"),
+        "nome": st.column_config.TextColumn("Nome do Estudante", disabled=True, width="large"),
+        "n1_str": st.column_config.TextColumn("1ª Cert. (N1)", disabled=True, width="small"),
+        "meta": st.column_config.NumberColumn("🎯 Meta N2", disabled=True, format="%.1f", width="small"),
+        "n2": st.column_config.NumberColumn("Nota 2ª Cert. (N2)", min_value=0.0, max_value=10.0, step=0.1, format="%.1f", width="medium")
+    }
+
+editor_key = f"editor_{turma_selecionada}_{disciplina_selecionada}_{'anon' if is_modo_anonimo else 'full'}"
+
 edited_df = st.data_editor(
-    df_display[["num", "nome", "n1_str", "meta_str", "n2", "mf_str", "status"]],
-    column_config={
-        "num": st.column_config.NumberColumn("Nº", disabled=True, width=50),
-        "nome": st.column_config.TextColumn("Nome do Estudante", disabled=True, width=280),
-        "n1_str": st.column_config.TextColumn("1ª Cert.", disabled=True, width=80),
-        "meta_str": st.column_config.TextColumn("🎯 Meta N2", disabled=True, width=90),
-        "n2": st.column_config.NumberColumn("Nota 2ª Cert.", min_value=0.0, max_value=10.0, step=0.1, format="%.1f", width=110),
-        "mf_str": st.column_config.TextColumn("Média Final", disabled=True, width=95),
-        "status": st.column_config.TextColumn("Situação", disabled=True, width=140)
-    },
+    df_display[cols_to_edit],
+    column_config=cfg,
     hide_index=True,
-    use_container_width=False,
-    key=f"editor_{turma_selecionada}_{disciplina_selecionada}"
+    use_container_width=True,
+    key=editor_key
 )
 
-# Atualiza o estado da sessão com novas notas digitadas
+# Sincroniza as notas digitadas no session_state
+for idx, row in edited_df.iterrows():
+    num_val = row["num"]
+    n2_val = row["n2"]
+    if not pd.isna(n2_val):
+        st.session_state[storage_key][num_val] = round(float(n2_val), 1)
+    elif num_val in st.session_state[storage_key] and pd.isna(n2_val):
+        del st.session_state[storage_key][num_val]
+
+# Cálculo em tempo real dos Resultados e Estatísticas
 results_list = []
 total_lancadas = 0
 total_aprovados = 0
 total_finais = 0
 soma_mf = 0.0
 
-for idx, row in edited_df.iterrows():
-    num = row["num"]
-    nome = row["nome"]
-    n1_raw = df_display.loc[idx, "n1"]
-    meta = df_display.loc[idx, "meta"]
-    n2_val = row["n2"]
+for idx, st_item in enumerate(students):
+    num = st_item["num"]
+    nome = st_item["nome"]
+    n1_raw = st_item["n1_grades"].get(disciplina_selecionada, None)
+    meta = calc_nota_minima(n1_raw)
     
-    if pd.isna(n2_val) or n2_val is None:
+    n2_val = st.session_state[storage_key].get(num, None)
+    
+    if n2_val is None:
         n2_calc = "(*)"
         mf = None
         status = "—"
-        st.session_state[state_key][num] = None
     else:
         n2_calc = round(float(n2_val), 1)
-        st.session_state[state_key][num] = n2_calc
         mf = calc_media_final(n1_raw, n2_calc)
         total_lancadas += 1
         if mf is not None:
             soma_mf += mf
             if mf >= 6.0:
                 total_aprovados += 1
-                status = "🟢 APROVADO"
+                status = "🟢 APROVADO DIRETO"
             else:
                 total_finais += 1
                 status = "🔴 PROVA FINAL"
@@ -271,7 +282,7 @@ for idx, row in edited_df.iterrows():
             
     results_list.append({
         "num": num,
-        "coc": df_display.loc[idx, "coc"],
+        "coc": st_item.get("coc", ""),
         "nome": nome,
         "n1": n1_raw,
         "meta_n2": meta,
@@ -279,6 +290,7 @@ for idx, row in edited_df.iterrows():
         "mf": mf,
         "status": status
     })
+
 # Painel de Indicadores Resumo
 col1, col2, col3, col4, col5 = st.columns(5)
 col1.metric("Total de Alunos", len(students))
@@ -286,6 +298,42 @@ col2.metric("Notas Lançadas", total_lancadas)
 col3.metric("Aprovados Direto", total_aprovados)
 col4.metric("Em Prova Final", total_finais)
 col5.metric("Média da Turma", f"{soma_mf / total_lancadas:.1f}" if total_lancadas > 0 else "-")
+
+st.write("---")
+
+# Tabela Consolidada com Média Final e Situação
+st.subheader("📊 Resumo da Turma (Média Final e Situação)")
+df_resumo = pd.DataFrame(results_list)
+
+if is_modo_anonimo:
+    # Exibe resumo sem nomes
+    st.dataframe(
+        df_resumo[["num", "n1", "meta_n2", "n2", "mf", "status"]].rename(columns={
+            "num": "Nº",
+            "n1": "1ª Cert. (N1)",
+            "meta_n2": "🎯 Meta N2",
+            "n2": "2ª Cert. (N2)",
+            "mf": "Média Final",
+            "status": "Situação"
+        }),
+        hide_index=True,
+        use_container_width=True
+    )
+else:
+    # Exibe resumo completo com nomes
+    st.dataframe(
+        df_resumo[["num", "nome", "n1", "meta_n2", "n2", "mf", "status"]].rename(columns={
+            "num": "Nº",
+            "nome": "Nome do Estudante",
+            "n1": "1ª Cert. (N1)",
+            "meta_n2": "🎯 Meta N2",
+            "n2": "2ª Cert. (N2)",
+            "mf": "Média Final",
+            "status": "Situação"
+        }),
+        hide_index=True,
+        use_container_width=True
+    )
 
 st.write("---")
 
