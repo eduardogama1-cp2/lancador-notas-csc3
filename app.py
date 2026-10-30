@@ -159,9 +159,19 @@ if uploaded_file is not None:
     except Exception as e:
         st.sidebar.error(f"Erro ao ler arquivo: {e}")
 
-# Montagem dos Dados da Turma Selecionada
+# Montagem e Gerenciamento de Estado das Notas
+state_key = f"notas_{turma_selecionada}_{disciplina_selecionada}"
+if state_key not in st.session_state:
+    st.session_state[state_key] = {}
+
+# Atualiza com notas importadas se houver
+if imported_grades:
+    for n_k, g_v in imported_grades.items():
+        st.session_state[state_key][n_k] = g_v
+
 students = turmas_data[turma_selecionada]["students"]
 
+# Monta DataFrame inicial com cálculo prévio de Média Final e Situação
 table_data = []
 for st_item in students:
     num = st_item["num"]
@@ -169,39 +179,62 @@ for st_item in students:
     n1 = st_item["n1_grades"].get(disciplina_selecionada, None)
     meta = calc_nota_minima(n1)
     
-    # Nota inicial: importada ou padrão vazia
-    default_n2 = imported_grades.get(num, None)
+    current_n2 = st.session_state[state_key].get(num, None)
     
+    if current_n2 is not None and not pd.isna(current_n2):
+        n2_calc = round(float(current_n2), 1)
+        mf = calc_media_final(n1, n2_calc)
+        mf_str = f"{mf:.1f}" if mf is not None else "—"
+        if mf is not None:
+            status = "🟢 APROVADO" if mf >= 6.0 else "🔴 PROVA FINAL"
+        else:
+            status = "—"
+    else:
+        n2_calc = None
+        mf = None
+        mf_str = "—"
+        status = "—"
+
+    n1_str = f"{float(n1):.1f}" if isinstance(n1, (int, float)) else "(*)"
+    meta_str = f"{meta:.1f}"
+
     table_data.append({
         "num": num,
         "coc": st_item.get("coc", ""),
         "nome": nome,
         "n1": n1,
-        "n1_str": f"{float(n1):.1f}" if isinstance(n1, (int, float)) else "(*)",
+        "n1_str": n1_str,
         "meta": meta,
-        "n2": default_n2
+        "meta_str": meta_str,
+        "n2": n2_calc,
+        "mf": mf,
+        "mf_str": mf_str,
+        "status": status
     })
 
 df_display = pd.DataFrame(table_data)
 
 # Grid de Edição Interativa
-st.subheader(f"📋 Lista de Estudantes — Turma {turma_selecionada} • {disciplina_selecionada}")
+st.subheader(f"📋 Lançamento — Turma {turma_selecionada} • {disciplina_selecionada}")
 
-# Edição das notas de N2 via data_editor do Streamlit
+# Edição interativa das notas com colunas compactas e exibição da Situação e Média Final
 edited_df = st.data_editor(
-    df_display[["num", "nome", "n1_str", "meta", "n2"]],
+    df_display[["num", "nome", "n1_str", "meta_str", "n2", "mf_str", "status"]],
     column_config={
-        "num": st.column_config.NumberColumn("Nº", disabled=True, width="small"),
-        "nome": st.column_config.TextColumn("Nome do Estudante", disabled=True, width="large"),
-        "n1_str": st.column_config.TextColumn("1ª Cert. (N1)", disabled=True, width="small"),
-        "meta": st.column_config.NumberColumn("🎯 Meta N2", disabled=True, format="%.1f", width="small"),
-        "n2": st.column_config.NumberColumn("Nota 2ª Cert. (N2)", min_value=0.0, max_value=10.0, step=0.1, format="%.1f", width="medium")
+        "num": st.column_config.NumberColumn("Nº", disabled=True, width=50),
+        "nome": st.column_config.TextColumn("Nome do Estudante", disabled=True, width=280),
+        "n1_str": st.column_config.TextColumn("1ª Cert.", disabled=True, width=80),
+        "meta_str": st.column_config.TextColumn("🎯 Meta N2", disabled=True, width=90),
+        "n2": st.column_config.NumberColumn("Nota 2ª Cert.", min_value=0.0, max_value=10.0, step=0.1, format="%.1f", width=110),
+        "mf_str": st.column_config.TextColumn("Média Final", disabled=True, width=95),
+        "status": st.column_config.TextColumn("Situação", disabled=True, width=140)
     },
     hide_index=True,
-    use_container_width=True
+    use_container_width=False,
+    key=f"editor_{turma_selecionada}_{disciplina_selecionada}"
 )
 
-# Cálculo em tempo real dos Resultados e Estatísticas
+# Atualiza o estado da sessão com novas notas digitadas
 results_list = []
 total_lancadas = 0
 total_aprovados = 0
@@ -212,22 +245,24 @@ for idx, row in edited_df.iterrows():
     num = row["num"]
     nome = row["nome"]
     n1_raw = df_display.loc[idx, "n1"]
-    meta = row["meta"]
+    meta = df_display.loc[idx, "meta"]
     n2_val = row["n2"]
     
-    if pd.isna(n2_val):
+    if pd.isna(n2_val) or n2_val is None:
         n2_calc = "(*)"
         mf = None
         status = "—"
+        st.session_state[state_key][num] = None
     else:
         n2_calc = round(float(n2_val), 1)
+        st.session_state[state_key][num] = n2_calc
         mf = calc_media_final(n1_raw, n2_calc)
         total_lancadas += 1
         if mf is not None:
             soma_mf += mf
             if mf >= 6.0:
                 total_aprovados += 1
-                status = "🟢 APROVADO DIRETO"
+                status = "🟢 APROVADO"
             else:
                 total_finais += 1
                 status = "🔴 PROVA FINAL"
@@ -244,7 +279,6 @@ for idx, row in edited_df.iterrows():
         "mf": mf,
         "status": status
     })
-
 # Painel de Indicadores Resumo
 col1, col2, col3, col4, col5 = st.columns(5)
 col1.metric("Total de Alunos", len(students))
