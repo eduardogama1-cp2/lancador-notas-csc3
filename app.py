@@ -115,12 +115,16 @@ def gerar_planilha_2_colunas(tcode, dcode, results):
     output.seek(0)
     return output
 
+# Inicialização do Armazenamento Global de Notas na Sessão (Garante que nunca se apaguem)
+if "todas_as_notas" not in st.session_state:
+    st.session_state["todas_as_notas"] = {}
+
 # Barra Superior / Título
 st.title("🎓 Colégio Pedro II — Lançamento da 2ª Certificação")
 st.markdown("##### Sistema Web para Docentes • Cálculo Dinâmico de Metas e Média Final")
 st.write("---")
 
-# Barra Lateral Esquerda (Filtros, Configurações e Exportação)
+# Barra Lateral - Parte 1: Seleções e Importação
 with st.sidebar:
     st.header("⚙️ Painel do Docente")
     turma_selecionada = st.selectbox("Selecione a Turma:", turmas_keys, index=0)
@@ -129,14 +133,16 @@ with st.sidebar:
     disciplina_selecionada = st.selectbox("Selecione a Disciplina:", disciplinas_da_turma, index=0)
     
     st.write("---")
-    st.subheader("📂 Importação de Notas")
+    st.subheader("📂 Importação de Notas (Opcional)")
     uploaded_file = st.file_uploader("Carregar planilha própria (.xlsx / .csv):", type=["xlsx", "xls", "csv"])
-    
-    st.write("---")
-    st.info("💡 **Regra de Média Ponderada**:\n(N1 × 2 + N2 × 3) / 5 ≥ 6,0\nArredondamento em 1 casa decimal.")
 
 # Importação de Planilha Externa
-imported_grades = {}
+turma_disc_key = f"{turma_selecionada}_{disciplina_selecionada}"
+if turma_disc_key not in st.session_state["todas_as_notas"]:
+    st.session_state["todas_as_notas"][turma_disc_key] = {}
+
+notas_atuais = st.session_state["todas_as_notas"][turma_disc_key]
+
 if uploaded_file is not None:
     try:
         if uploaded_file.name.endswith('.csv'):
@@ -144,7 +150,7 @@ if uploaded_file is not None:
         else:
             df_imp = pd.read_excel(uploaded_file)
         
-        # Procura coluna de número e nota
+        count_imp = 0
         for _, row in df_imp.iterrows():
             vals = list(row.values)
             if len(vals) >= 2:
@@ -152,85 +158,106 @@ if uploaded_file is not None:
                     num_val = int(vals[0])
                     grade_val = float(str(vals[1]).replace(',', '.'))
                     if 0.0 <= grade_val <= 10.0:
-                        imported_grades[num_val] = grade_val
+                        notas_atuais[num_val] = grade_val
+                        count_imp += 1
                 except (ValueError, TypeError):
                     continue
-        st.sidebar.success(f"Notas importadas para {len(imported_grades)} alunos!")
+        if count_imp > 0:
+            st.sidebar.success(f"Notas importadas para {count_imp} alunos!")
     except Exception as e:
         st.sidebar.error(f"Erro ao ler arquivo: {e}")
-
-# Chave do editor no st.session_state para sincronização
-editor_key = f"editor_{turma_selecionada}_{disciplina_selecionada}"
 
 # Montagem dos Dados da Turma Selecionada
 students = turmas_data[turma_selecionada]["students"]
 
-# Recupera edições já feitas pelo usuário se existirem no session_state
-user_edits = {}
-if editor_key in st.session_state and "edited_rows" in st.session_state[editor_key]:
-    user_edits = st.session_state[editor_key]["edited_rows"]
-
 table_data = []
-for idx, st_item in enumerate(students):
-    num = st_item["num"]
+for st_item in students:
+    num = int(st_item["num"])
     n1 = st_item["n1_grades"].get(disciplina_selecionada, None)
     meta = calc_nota_minima(n1)
     
-    # Determina valor de N2 (edição manual > importação > vazio)
-    if idx in user_edits and "n2" in user_edits[idx]:
-        raw_n2 = user_edits[idx]["n2"]
-    elif num in imported_grades:
-        raw_n2 = imported_grades[num]
-    else:
-        raw_n2 = None
-        
-    if raw_n2 is not None and str(raw_n2).strip() not in ["", "None", "(*)"]:
-        try:
-            n2_val = round(float(raw_n2), 1)
-            mf_val = calc_media_final(n1, n2_val)
-            st_text = "🟢 APROVADO" if (mf_val is not None and mf_val >= 6.0) else ("🔴 PROVA FINAL" if mf_val is not None else "—")
-        except ValueError:
-            n2_val = None
-            mf_val = None
-            st_text = "—"
-    else:
-        n2_val = None
-        mf_val = None
-        st_text = "—"
-
+    # Busca a nota persistida no session_state (nunca se apaga entre cliques)
+    n2_persistida = notas_atuais.get(num, None)
+    
+    mf_str = "-"
+    st_str = "-"
+    if n2_persistida is not None:
+        mf = calc_media_final(n1, n2_persistida)
+        if mf is not None:
+            mf_str = f"{mf:.1f}"
+            st_str = "🟢 APROVADO" if mf >= 6.0 else "🔴 PROVA FINAL"
+    
     table_data.append({
         "num": num,
-        "n1": n1,
-        "n1_str": f"{float(n1):.1f}" if isinstance(n1, (int, float)) else "(*)",
+        "n1_raw": n1,
+        "coc": st_item.get("coc", ""),
+        "nome": st_item["nome"],
+        "n1_str": f"{float(n1):.1f}" if isinstance(n1, (int, float)) else (str(n1) if n1 else "(*)"),
         "meta": meta,
-        "n2": n2_val,
-        "mf": mf_val,
-        "status": st_text
+        "n2": float(n2_persistida) if n2_persistida is not None else None,
+        "mf": mf_str,
+        "status": st_str
     })
 
 df_display = pd.DataFrame(table_data)
 
 # Grid de Edição Interativa
 st.subheader(f"📋 Lançamento de Notas — Turma {turma_selecionada} • {disciplina_selecionada}")
+st.caption("🔒 **Ambiente Seguro**: Apenas o número oficial de chamada dos estudantes é exibido.")
 
-# Edição das notas de N2 via data_editor do Streamlit (apenas números, sem nomes, colunas compactas)
+# Data Editor com Chave Única por Turma e Disciplina (Garante estabilidade ao digitar)
+editor_key = f"grid_{turma_selecionada}_{disciplina_selecionada}"
+
 edited_df = st.data_editor(
     df_display[["num", "n1_str", "meta", "n2", "mf", "status"]],
     column_config={
-        "num": st.column_config.NumberColumn("Nº", disabled=True, width=65),
-        "n1_str": st.column_config.TextColumn("1ª Cert.", disabled=True, width=90),
-        "meta": st.column_config.NumberColumn("🎯 Meta N2", disabled=True, format="%.1f", width=95),
-        "n2": st.column_config.NumberColumn("Nota 2ª Cert.", min_value=0.0, max_value=10.0, step=0.1, format="%.1f", width=120),
-        "mf": st.column_config.NumberColumn("Média Final", disabled=True, format="%.1f", width=95),
-        "status": st.column_config.TextColumn("Situação", disabled=True, width=140)
+        "num": st.column_config.NumberColumn(
+            "Nº",
+            disabled=True,
+            width=65,
+            help="Número de chamada oficial"
+        ),
+        "n1_str": st.column_config.TextColumn(
+            "1ª Cert.",
+            disabled=True,
+            width=90,
+            help="Nota da 1ª Certificação (N1)"
+        ),
+        "meta": st.column_config.NumberColumn(
+            "🎯 Meta N2",
+            disabled=True,
+            format="%.1f",
+            width=95,
+            help="Meta necessária na 2ª Certificação para aprovação direta (Média Final >= 6,0)"
+        ),
+        "n2": st.column_config.NumberColumn(
+            "Nota 2ª Cert.",
+            min_value=0.0,
+            max_value=10.0,
+            step=0.1,
+            format="%.1f",
+            width=120,
+            help="Digite a nota da 2ª Certificação (0,0 a 10,0)"
+        ),
+        "mf": st.column_config.TextColumn(
+            "Média Final",
+            disabled=True,
+            width=95,
+            help="Média Final Ponderada: (N1 x 2 + N2 x 3) / 5"
+        ),
+        "status": st.column_config.TextColumn(
+            "Situação",
+            disabled=True,
+            width=140,
+            help="Situação do estudante"
+        )
     },
-    disabled=["num", "n1_str", "meta", "mf", "status"],
     hide_index=True,
     use_container_width=False,
     key=editor_key
 )
 
-# Cálculo em tempo real dos Resultados Finais para Estatísticas e Exportação
+# Sincronização Imediata e Segura de Qualquer Nota Alterada
 results_list = []
 total_lancadas = 0
 total_aprovados = 0
@@ -238,37 +265,37 @@ total_finais = 0
 soma_mf = 0.0
 
 for idx, row in edited_df.iterrows():
-    num = row["num"]
-    n1_raw = df_display.loc[idx, "n1"]
+    num = int(row["num"])
+    n1_raw = df_display.loc[idx, "n1_raw"]
     meta = row["meta"]
     n2_val = row["n2"]
     
-    if pd.isna(n2_val) or n2_val is None or str(n2_val).strip() in ["", "None", "(*)"]:
+    if pd.isna(n2_val) or n2_val is None:
         n2_calc = "(*)"
         mf = None
         status = "—"
+        if num in notas_atuais:
+            del notas_atuais[num]
     else:
-        try:
-            n2_calc = round(float(n2_val), 1)
-            mf = calc_media_final(n1_raw, n2_calc)
-            total_lancadas += 1
-            if mf is not None:
-                soma_mf += mf
-                if mf >= 6.0:
-                    total_aprovados += 1
-                    status = "🟢 APROVADO"
-                else:
-                    total_finais += 1
-                    status = "🔴 PROVA FINAL"
+        n2_calc = round(float(n2_val), 1)
+        notas_atuais[num] = n2_calc  # Gravação imediata no session_state!
+        mf = calc_media_final(n1_raw, n2_calc)
+        total_lancadas += 1
+        if mf is not None:
+            soma_mf += mf
+            if mf >= 6.0:
+                total_aprovados += 1
+                status = "🟢 APROVADO"
             else:
-                status = "—"
-        except (ValueError, TypeError):
-            n2_calc = "(*)"
-            mf = None
+                total_finais += 1
+                status = "🔴 PROVA FINAL"
+        else:
             status = "—"
             
     results_list.append({
         "num": num,
+        "coc": df_display.loc[idx, "coc"],
+        "nome": df_display.loc[idx, "nome"],
         "n1": n1_raw,
         "meta_n2": meta,
         "n2": n2_calc,
@@ -277,7 +304,7 @@ for idx, row in edited_df.iterrows():
     })
 
 # Painel de Indicadores Resumo
-st.write("---")
+st.write("")
 col1, col2, col3, col4, col5 = st.columns(5)
 col1.metric("Total de Alunos", len(students))
 col2.metric("Notas Lançadas", total_lancadas)
@@ -285,18 +312,20 @@ col3.metric("Aprovados Direto", total_aprovados)
 col4.metric("Em Prova Final", total_finais)
 col5.metric("Média da Turma", f"{soma_mf / total_lancadas:.1f}" if total_lancadas > 0 else "-")
 
-# Geração do Arquivo Excel Oficial de 2 Colunas
-planilha_excel = gerar_planilha_2_colunas(turma_selecionada, disciplina_selecionada, results_list)
-
-# BOTÃO DE EXPORTAÇÃO NA COLUNA LATERAL ESQUERDA (SIDEBAR)
+# Barra Lateral - Parte 2: Botão de Download na Coluna Lateral Esquerda
 with st.sidebar:
     st.write("---")
-    st.subheader("📥 Exportação Oficial")
+    st.subheader("💾 Exportação Oficial")
+    planilha_excel = gerar_planilha_2_colunas(turma_selecionada, disciplina_selecionada, results_list)
+    
     st.download_button(
-        label=f"💾 Baixar Planilha de Envio ({turma_selecionada}_{disciplina_selecionada}.xlsx)",
+        label=f"💾 Baixar Planilha de Envio\n({turma_selecionada}_{disciplina_selecionada}.xlsx)",
         data=planilha_excel,
         file_name=f"{turma_selecionada}_{disciplina_selecionada}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True
     )
-    st.caption("Gera o arquivo oficial com **2 colunas** (Nº e Disciplina) e identificação da turma e matéria no topo para envio à direção/secretaria.")
+    st.caption("A planilha gerada possui estritamente **2 colunas** (Nº e Disciplina) com o cabeçalho oficial para envio à direção.")
+    
+    st.write("---")
+    st.info("💡 **Regra de Média Ponderada**:\n(N1 × 2 + N2 × 3) / 5 ≥ 6,0\nArredondamento em 1 casa decimal.")
